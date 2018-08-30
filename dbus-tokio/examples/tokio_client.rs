@@ -13,8 +13,7 @@ extern crate futures;
 
 use dbus::*;
 
-use std::rc::Rc;
-use tokio::reactor::Handle;
+use std::sync::Arc;
 use tokio::runtime::current_thread::Runtime;
 use tokio_timer::{clock, Interval};
 use std::time::Duration;
@@ -24,7 +23,7 @@ use dbus_tokio::AConnection;
 fn main() {
     // Let's start by starting up a connection to the session bus. We do not register a name
     // because we do not intend to expose any objects on the bus.
-    let c = Rc::new(Connection::get_private(BusType::Session).unwrap());
+    let c = Arc::new(Connection::get_private(BusType::Session).unwrap());
 
     // To receive D-Bus signals we need to add match that defines which signals should be forwarded
     // to our application.
@@ -32,8 +31,9 @@ fn main() {
 
     // Create Tokio event loop along with asynchronous connection object
     let mut rt = Runtime::new().unwrap();
-    let aconn = AConnection::new(c.clone(), Handle::current(), &mut rt).unwrap();
-
+    let (aconn, _adriver) = AConnection::new(c.clone()).unwrap();
+    
+    let aconn = Arc::new(aconn);
     // Create interval - a Stream that will fire an event periodically
     let interval = Interval::new(clock::now(), Duration::from_secs(2));
 
@@ -41,12 +41,13 @@ fn main() {
     let interval = interval.map_err(|e| panic!("TimerError: {}", e) );
 
     // Create a future calling D-Bus method each time the interval generates a tick
-    let calls = interval.for_each(|_| {
+    let interval_conn = aconn.clone();
+    let calls = interval.for_each(move |_| {
         println!("Calling Hello...");
         //TODO: try to handle error when calling on "/"
         let m = Message::new_method_call("com.example.dbustest", "/hello", "com.example.dbustest", "Hello")
             .unwrap().append1(500u32);
-        aconn.method_call(m).unwrap().then(|reply| {
+        interval_conn.method_call(m).unwrap().then(|reply| {
             let m = reply.unwrap();
             let msg: &str = m.get1().unwrap();
             println!("{}", msg);
@@ -54,10 +55,13 @@ fn main() {
         })
     });
 
+
     // Create stream of all incoming D-Bus messages. On top of the messages stream create future,
     // running forever, handling all incoming messages
     let messages = aconn.messages().unwrap();
-    let signals = messages.for_each(|m| {
+    let signals = messages
+        .map_err(|e| panic!("Messages error: {:?}", e) )
+        .for_each(|m| {
         let headers = m.headers();
         let member = headers.3.unwrap();
         if member == "HelloHappened" {

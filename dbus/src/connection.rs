@@ -191,6 +191,9 @@ struct IConnection {
     filter_cb_panic: RefCell<thread::Result<()>>,
 }
 
+unsafe impl Send for IConnection{}
+
+unsafe impl Sync for IConnection{}
 /// A D-Bus connection. Start here if you want to get on the D-Bus!
 pub struct Connection {
     i: Box<IConnection>,
