@@ -31,7 +31,7 @@ type MStream = Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>;
 /// Creating more than one AConnection for the same Connection is not recommended.
 pub struct AConnection {
     conn: Arc<Connection>,
-    quit_tx: Option<Arc<oneshot::Sender<()>>>,
+    pub quit_tx: Option<Arc<oneshot::Sender<()>>>,
     callmap: MCallMap,
     msgstream: MStream,
 }
@@ -56,12 +56,14 @@ impl AConnection {
 
         c.set_watch_callback(Box::new(|_| unimplemented!("Watch handling is very rare and not implemented yet")));
 
-        let i = AConnection {
+
+        let mut i = AConnection {
             conn: c,
             quit_tx: Some(Arc::new(quit_tx)),
             callmap: map,
             msgstream: istream,
         };
+
 
         for w in i.conn.watch_fds() {
             d.modify_watch(w, false)?;
@@ -80,20 +82,6 @@ impl AConnection {
         }
         let mc = AMethodCall { serial: r, callmap: self.callmap.clone(), inner: rx };
         Ok(mc)
-    }
-
-    /// Returns a stream of incoming messages.
-    ///
-    /// Creating more than one stream for the same AConnection is not supported; this function will
-    /// fail with an error if you try. Drop the first stream if you need to create a second one.
-    pub fn messages(&self) -> Result<AMessageStream, &'static str> {
-        let (tx, rx) = mpsc::unbounded();
-        {
-            let mut i = self.msgstream.lock().unwrap();
-            if i.is_some() { return Err("Another instance of AMessageStream already exists"); }
-            *i = Some(tx);
-        }
-        Ok(AMessageStream { inner: rx, stream: self.msgstream.clone(), quit: self.quit_tx.as_ref().map(|q| q.clone()) })
     }
 }
 
@@ -175,7 +163,7 @@ impl Future for ADriver {
         for w in self.fds.values() {
             let mut mask = UnixReady::hup() | UnixReady::error();
             if w.get_ref().0.readable() { mask = mask | Ready::readable().into(); }
-            //if w.get_ref().0.writable() { mask = mask | Ready::writable().into(); }
+            if w.get_ref().0.writable() { mask = mask | Ready::writable().into(); }
             let prr = w.poll_read_ready(*mask).map_err(|_| ())?;
             debug!("D-Bus i/o poll read ready: {:?} is {:?}", w.get_ref().0.fd(), prr);
             let pwr = w.poll_write_ready().map_err(|_| ())?;
@@ -277,15 +265,34 @@ impl Drop for AMethodCall {
 /// Messages already processed (method returns for AMethodCall)
 /// are already consumed and will not be present in the stream.
 pub struct AMessageStream {
+    driver: ADriver,
     inner: mpsc::UnboundedReceiver<Message>,
     quit: Option<Arc<oneshot::Sender<()>>>,
-    stream: MStream,
+    //stream: MStream,
+}
+
+impl AMessageStream {
+    /// Returns a stream of incoming messages.
+    ///
+    /// Creating more than one stream for the same AConnection is not supported; this function will
+    /// fail with an error if you try. Drop the first stream if you need to create a second one.
+    pub fn messages(driver: ADriver, quit_tx: Option<Arc<oneshot::Sender<()>>>) -> Result<AMessageStream, &'static str> {
+        let (tx, rx) = mpsc::unbounded();
+        {
+            let mut i = driver.msgstream.lock().unwrap();
+            if i.is_some() { return Err("Another instance of AMessageStream already exists"); }
+            *i = Some(tx);
+        }
+        Ok(AMessageStream { driver: driver, inner: rx, quit: quit_tx })
+    }
 }
 
 impl Stream for AMessageStream {
     type Item = Message;
     type Error = ();
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        debug!("Polling Driver");
+        self.driver.poll()?;
         debug!("Polling message stream");
         let r = self.inner.poll();
         debug!("msgstream found {:?}", r);
@@ -296,7 +303,7 @@ impl Stream for AMessageStream {
 impl Drop for AMessageStream {
     fn drop(&mut self) {
         {
-            let mut stream = self.stream.lock().unwrap();
+            let mut stream = self.driver.msgstream.lock().unwrap();
             *stream = None;
         }
         debug!("Dropping AMessageStream");
