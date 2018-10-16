@@ -266,6 +266,7 @@ impl Drop for AMethodCall {
 /// are already consumed and will not be present in the stream.
 pub struct AMessageStream {
     driver: ADriver,
+    connection: AConnection,
     inner: mpsc::UnboundedReceiver<Message>,
     quit: Option<Arc<oneshot::Sender<()>>>,
     //stream: MStream,
@@ -276,14 +277,16 @@ impl AMessageStream {
     ///
     /// Creating more than one stream for the same AConnection is not supported; this function will
     /// fail with an error if you try. Drop the first stream if you need to create a second one.
-    pub fn messages(driver: ADriver, quit_tx: Option<Arc<oneshot::Sender<()>>>) -> Result<AMessageStream, &'static str> {
+    pub fn messages(driver: ADriver, connection: AConnection) -> Result<AMessageStream, &'static str> {
         let (tx, rx) = mpsc::unbounded();
         {
             let mut i = driver.msgstream.lock().unwrap();
             if i.is_some() { return Err("Another instance of AMessageStream already exists"); }
             *i = Some(tx);
         }
-        Ok(AMessageStream { driver: driver, inner: rx, quit: quit_tx })
+
+        let quit = connection.quit_tx.as_ref().map(|q| q.clone());
+        Ok(AMessageStream { driver: driver, connection: connection, inner: rx, quit: quit})
     }
 }
 
