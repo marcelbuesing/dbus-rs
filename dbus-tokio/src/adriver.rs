@@ -1,19 +1,11 @@
 use std::sync::Mutex;
-use std::sync::RwLock;
 use mio::{self, unix, Ready};
 use mio::unix::UnixReady;
 use std::io;
 use dbus::{Connection, ConnMsgs, Watch, WatchEvent, Message, MessageType, Error as DBusError};
 use futures::{Async, Future, Stream, Poll};
 use futures::sync::{oneshot, mpsc};
-use futures::future;
-use tokio;
-use tokio::prelude::*;
 use tokio::reactor::PollEvented2;
-use tokio::runtime::Runtime;
-use std::borrow::BorrowMut;
-use std::borrow::Borrow;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::os::raw::c_uint;
 use std::collections::HashMap;
@@ -31,7 +23,6 @@ type MStream = Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>;
 /// Creating more than one AConnection for the same Connection is not recommended.
 pub struct AConnection {
     conn: Arc<Connection>,
-    pub quit_tx: Option<Arc<oneshot::Sender<()>>>,
     callmap: MCallMap,
     msgstream: MStream,
 }
@@ -41,35 +32,51 @@ impl AConnection {
     ///
     /// The task handles incoming messages, and continues to do so until the
     /// AConnection is dropped.
-    pub fn new(c: Arc<Connection>) -> io::Result<(AConnection, ADriver)>  {
+    pub fn new(c: Arc<Connection>) -> io::Result<AConnection>  {
         let map: MCallMap = Default::default();
         let istream: MStream = Default::default();
-        let (quit_tx, quit_rx) = oneshot::channel();
-
-      let mut d = ADriver {
-            conn: c.clone(),
-            fds: HashMap::new(),
-            quit:  quit_rx,
-            callmap: map.clone(),
-            msgstream: istream.clone(),
-        };
 
         c.set_watch_callback(Box::new(|_| unimplemented!("Watch handling is very rare and not implemented yet")));
 
-
-        let mut i = AConnection {
+        let i = AConnection {
             conn: c,
-            quit_tx: Some(Arc::new(quit_tx)),
             callmap: map,
             msgstream: istream,
         };
 
+        Ok(i)
+    }
 
-        for w in i.conn.watch_fds() {
-            d.modify_watch(w, false)?;
+    /// Returns a stream of incoming messages.
+    ///
+    /// Creating more than one stream for the same AConnection is not supported; this function will
+    /// fail with an error if you try. Drop the first stream if you need to create a second one.
+    pub fn messages(self) -> Result<AMessageStream, &'static str> {
+
+        let (quit_tx, quit_rx) = oneshot::channel();
+        let mut driver = ADriver {
+            conn: self.conn.clone(),
+            fds: HashMap::new(),
+            quit:  quit_rx,
+            callmap: self.callmap.clone(),
+            msgstream: self.msgstream.clone(),
+        };
+
+        for w in self.conn.watch_fds() {
+            driver.modify_watch(w, false).map_err(|e| {
+                error!("Failed to modify watches: {:?}", e);
+                "Failed to modify watches"
+            })?;
         }
 
-        Ok((i, d))
+        let (tx, rx) = mpsc::unbounded();
+        {
+            let mut i = driver.msgstream.lock().unwrap();
+            if i.is_some() { return Err("Another instance of AMessageStream already exists"); }
+            *i = Some(tx);
+        }
+
+        Ok(AMessageStream { driver: driver, inner: rx, quit: quit_tx})
     }
 
     /// Sends a method call message, and returns a Future for the method return.
@@ -88,10 +95,6 @@ impl AConnection {
 impl Drop for AConnection {
     fn drop(&mut self) {
         debug!("Dropping AConnection");
-        if let Ok(x) = Arc::try_unwrap(self.quit_tx.take().unwrap()) {
-            debug!("AConnection telling ADriver to quit");
-            let _ = x.send(());
-        }
         self.conn.set_watch_callback(Box::new(|_| {}));
     }
 }
@@ -132,7 +135,7 @@ impl ADriver {
     }
 
     fn send_stream(&self, m: Message) {
-        let mut msgstream = self.msgstream.lock().unwrap();
+        let msgstream = self.msgstream.lock().unwrap();
         msgstream.as_ref().map(|ref z| { z.unbounded_send(m).unwrap() });
     }
 
@@ -163,7 +166,7 @@ impl Future for ADriver {
         for w in self.fds.values() {
             let mut mask = UnixReady::hup() | UnixReady::error();
             if w.get_ref().0.readable() { mask = mask | Ready::readable().into(); }
-            if w.get_ref().0.writable() { mask = mask | Ready::writable().into(); }
+            //if w.get_ref().0.writable() { mask = mask | Ready::writable().into(); }
             let prr = w.poll_read_ready(*mask).map_err(|_| ())?;
             debug!("D-Bus i/o poll read ready: {:?} is {:?}", w.get_ref().0.fd(), prr);
             let pwr = w.poll_write_ready().map_err(|_| ())?;
@@ -266,28 +269,8 @@ impl Drop for AMethodCall {
 /// are already consumed and will not be present in the stream.
 pub struct AMessageStream {
     driver: ADriver,
-    connection: AConnection,
     inner: mpsc::UnboundedReceiver<Message>,
-    quit: Option<Arc<oneshot::Sender<()>>>,
-    //stream: MStream,
-}
-
-impl AMessageStream {
-    /// Returns a stream of incoming messages.
-    ///
-    /// Creating more than one stream for the same AConnection is not supported; this function will
-    /// fail with an error if you try. Drop the first stream if you need to create a second one.
-    pub fn messages(driver: ADriver, connection: AConnection) -> Result<AMessageStream, &'static str> {
-        let (tx, rx) = mpsc::unbounded();
-        {
-            let mut i = driver.msgstream.lock().unwrap();
-            if i.is_some() { return Err("Another instance of AMessageStream already exists"); }
-            *i = Some(tx);
-        }
-
-        let quit = connection.quit_tx.as_ref().map(|q| q.clone());
-        Ok(AMessageStream { driver: driver, connection: connection, inner: rx, quit: quit})
-    }
+    quit: oneshot::Sender<()>,
 }
 
 impl Stream for AMessageStream {
@@ -310,10 +293,6 @@ impl Drop for AMessageStream {
             *stream = None;
         }
         debug!("Dropping AMessageStream");
-        if let Ok(x) = Arc::try_unwrap(self.quit.take().unwrap()) {
-            debug!("AMessageStream telling ADriver to quit");
-            let _ = x.send(());
-        }
     }
 }
 
