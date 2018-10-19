@@ -150,7 +150,7 @@ impl Stream for ADriver {
     type Item = Message;
     type Error = ();
 
-    fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         for w in self.fds.values() {
             let mut mask = UnixReady::hup() | UnixReady::error();
             if w.get_ref().0.readable() {
