@@ -53,7 +53,7 @@ impl AConnection {
     ///
     /// Creating more than one stream for the same AConnection is not supported; this function will
     /// fail with an error if you try. Drop the first stream if you need to create a second one.
-    pub fn messages(self) -> Result<ADriver, &'static str> {
+    pub fn messages(self) -> io::Result<ADriver> {
         let mut driver = ADriver {
             conn: self.conn.clone(),
             fds: HashMap::new(),
@@ -61,10 +61,7 @@ impl AConnection {
         };
 
         for w in self.conn.watch_fds() {
-            driver.modify_watch(w, false).map_err(|e| {
-                error!("Failed to modify watches: {:?}", e);
-                "Failed to modify watches"
-            })?;
+            driver.modify_watch(w, false)?;
         }
 
         Ok(driver)
