@@ -12,8 +12,8 @@
 
 extern crate dbus;
 extern crate futures;
-extern crate tokio;
 extern crate mio;
+extern crate tokio;
 
 #[macro_use]
 extern crate log;
@@ -22,4 +22,4 @@ pub mod tree;
 
 mod adriver;
 
-pub use adriver::{AConnection, AMessageStream, AMethodCall};
+pub use adriver::{AConnection, AMethodCall};
