@@ -148,6 +148,7 @@ impl Stream for ADriver {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        trace!("Evented fds {}", self.fds.len());
         for w in self.fds.values() {
             let mut mask = UnixReady::hup() | UnixReady::error();
             if w.get_ref().0.readable() {
@@ -203,9 +204,8 @@ impl Stream for ADriver {
                 let mut msgs = ConnMsgs { conn: self.conn.clone(), timeout_ms: None };
                 if let Some(msg) = msgs.next() {
                     return Ok(Async::Ready(Some(msg)));
-                } else {
-                    w.clear_read_ready(Ready::readable()).map_err(|_| ())?;
-                };
+                }
+                w.clear_read_ready(Ready::readable()).map_err(|_| ())?;
             };
 
             if ur.is_writable() {
@@ -227,14 +227,15 @@ impl mio::Evented for AWatch {
         mut interest: mio::Ready,
         mut opts: mio::PollOpt,
     ) -> io::Result<()> {
+        trace!("Registered token {:?}", token);
         if !self.0.readable() {
             interest.remove(mio::Ready::readable())
         };
         if !self.0.writable() {
             interest.remove(mio::Ready::writable())
         };
-        opts.remove(mio::PollOpt::edge());
-        opts.insert(mio::PollOpt::level());
+        opts.remove(mio::PollOpt::level());
+        opts.insert(mio::PollOpt::edge());
         unix::EventedFd(&self.0.fd()).register(poll, token, interest, opts)
     }
 
@@ -245,14 +246,15 @@ impl mio::Evented for AWatch {
         mut interest: mio::Ready,
         mut opts: mio::PollOpt,
     ) -> io::Result<()> {
+        trace!("Unregistered token {:?}", token);
         if !self.0.readable() {
             interest.remove(mio::Ready::readable())
         };
         if !self.0.writable() {
             interest.remove(mio::Ready::writable())
         };
-        opts.remove(mio::PollOpt::edge());
-        opts.insert(mio::PollOpt::level());
+        opts.remove(mio::PollOpt::level());
+        opts.insert(mio::PollOpt::edge());
         unix::EventedFd(&self.0.fd()).reregister(poll, token, interest, opts)
     }
 
@@ -274,6 +276,7 @@ impl Future for AMethodCall {
     type Error = DBusError;
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+        debug!("Poll AMethodCall");
         let x = self.inner.poll().map_err(|_| {
             DBusError::new_custom("org.freedesktop.DBus.Failed", "Tokio cancelled future")
         })?;
@@ -299,7 +302,7 @@ fn aconnection_test() {
 
     let aconn = AConnection::new(conn.clone());
 
-    let mut rt = Runtime::new().unwrap();
+//    let mut rt = Runtime::new().unwrap();
 
     /* let m = ::dbus::Message::new_method_call("org.freedesktop.DBus", "/", "org.freedesktop.DBus", "ListNames").unwrap();
     let reply = rt.block_on(aconn.method_call(m).unwrap()).unwrap();
