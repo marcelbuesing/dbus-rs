@@ -202,7 +202,8 @@ impl Stream for ADriver {
             self.conn.watch_handle(w.get_ref().0.fd(), flags);
             if ur.is_readable() {
                 let mut msgs = ConnMsgs { conn: self.conn.clone(), timeout_ms: None };
-                if let Some(msg) = msgs.next() {
+                // Calling last will consume all other messages in the socket buffer!
+                if let Some(msg) = msgs.last() {
                     return Ok(Async::Ready(Some(msg)));
                 }
                 w.clear_read_ready(Ready::readable()).map_err(|_| ())?;
