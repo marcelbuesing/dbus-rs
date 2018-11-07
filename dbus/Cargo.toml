@@ -13,6 +13,7 @@ categories = ["os::unix-apis", "api-bindings"]
 readme = "../README.md"
 
 [dependencies]
+log = "0.3"
 libc = "0.2.7"
 libdbus-sys = { path = "../libdbus-sys", version = "0.1.5" }
 

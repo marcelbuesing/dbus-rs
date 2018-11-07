@@ -114,6 +114,7 @@ impl<'a> Iterator for ConnectionItems<'a> {
     type Item = ConnectionItem;
     fn next(&mut self) -> Option<ConnectionItem> {
         loop {
+            trace!("Loop next ConnectionItems");
             if self.c.i.filter_cb.borrow().is_none() { panic!("ConnectionItems::next called recursively or with a MessageCallback set to None"); }
             let i: Option<ConnectionItem> = self.c.next_msg().map(|x| x.into());
             if let Some(ci) = i {
@@ -121,10 +122,10 @@ impl<'a> Iterator for ConnectionItems<'a> {
             }
 
             if let Some(t) = self.timeout_ms {
-		let r = unsafe { ffi::dbus_connection_read_write_dispatch(self.c.conn(), t as c_int) };
-		self.c.check_panic();
-		if !self.c.i.pending_items.borrow().is_empty() { continue };
-		if r == 0 { return None; }
+                let r = unsafe { ffi::dbus_connection_read_write_dispatch(self.c.conn(), t as c_int) };
+                self.c.check_panic();
+                if !self.c.i.pending_items.borrow().is_empty() { continue };
+                if r == 0 { return None; }
             }
 
             let r = unsafe { ffi::dbus_connection_dispatch(self.c.conn()) };
@@ -153,18 +154,21 @@ pub struct ConnMsgs<C> {
 impl<C: ops::Deref<Target = Connection>> Iterator for ConnMsgs<C> {
     type Item = Message;
     fn next(&mut self) -> Option<Self::Item> {
-        
+
         loop {
+            trace!("Loop next ConnMsgs");
             let iconn = &self.conn.i;
             if iconn.filter_cb.borrow().is_none() { panic!("ConnMsgs::next called recursively or with a MessageCallback set to None"); }
             let i = self.conn.next_msg();
-            if let Some(ci) = i { return Some(ci); }
+            if let Some(ci) = i {
+                return Some(ci);
+            }
 
             if let Some(t) = self.timeout_ms {
-		let r = unsafe { ffi::dbus_connection_read_write_dispatch(self.conn.conn(), t as c_int) };
-		self.conn.check_panic();
-		if !iconn.pending_items.borrow().is_empty() { continue };
-		if r == 0 { return None; }
+                let r = unsafe { ffi::dbus_connection_read_write_dispatch(self.conn.conn(), t as c_int) };
+                self.conn.check_panic();
+                if !iconn.pending_items.borrow().is_empty() { continue };
+                if r == 0 { return None; }
             }
 
             let r = unsafe { ffi::dbus_connection_dispatch(self.conn.conn()) };
@@ -240,6 +244,7 @@ extern "C" fn filter_message_cb(conn: *mut ffi::DBusConnection, msg: *mut ffi::D
 
 fn default_filter_callback(c: &Connection, m: Message) -> bool {
     let b = m.msg_type() == MessageType::Signal;
+    trace!("Callback: Added new pending element");
     c.i.pending_items.borrow_mut().push_back(m);
     b
 }
@@ -602,6 +607,7 @@ impl Connection {
     }
 
     fn next_msg(&self) -> Option<Message> {
+        trace!("Pending items count{}", self.i.pending_items.borrow().len());
         while let Some(msg) = self.i.pending_items.borrow_mut().pop_front() {
             let mut v: MsgHandlerList = mem::replace(&mut *self.i.handlers.borrow_mut(), vec!());
             let b = msghandler_process(&mut v, &msg, self);

@@ -22,7 +22,7 @@ type MStream = Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>;
 /// While an AConnection exists, it will consume all incoming messages.
 /// Creating more than one AConnection for the same Connection is not recommended.
 pub struct AConnection {
-    conn: Arc<Connection>,
+    conn: Arc<Mutex<Connection>>,
     callmap: MCallMap,
     msgstream: MStream,
 }
@@ -32,7 +32,7 @@ impl AConnection {
     ///
     /// The task handles incoming messages, and continues to do so until the
     /// AConnection is dropped.
-    pub fn new(c: Arc<Connection>) -> io::Result<AConnection> {
+    pub fn new(c: Connection) -> io::Result<AConnection> {
         let map: MCallMap = Default::default();
         let istream: MStream = Default::default();
 
@@ -41,7 +41,7 @@ impl AConnection {
         }));
 
         let i = AConnection {
-            conn: c,
+            conn: Arc::new(Mutex::new(c)),
             callmap: map,
             msgstream: istream,
         };
@@ -56,11 +56,12 @@ impl AConnection {
     pub fn messages(self) -> io::Result<ADriver> {
         let mut driver = ADriver {
             conn: self.conn.clone(),
-            fds: HashMap::new(),
+            fds: Arc::new(Mutex::new(HashMap::new())),
             callmap: self.callmap.clone(),
         };
 
-        for w in self.conn.watch_fds() {
+        let conn = self.conn.lock().unwrap();
+        for w in conn.watch_fds() {
             driver.modify_watch(w, false)?;
         }
 
@@ -69,7 +70,8 @@ impl AConnection {
 
     /// Sends a method call message, and returns a Future for the method return.
     pub fn method_call(&self, m: Message) -> Result<AMethodCall, &'static str> {
-        let r = self.conn.send(m).map_err(|_| "D-Bus send error")?;
+        let conn = self.conn.lock().unwrap();
+        let r = conn.send(m).map_err(|_| "D-Bus send error")?;
         let (tx, rx) = oneshot::channel();
         {
             let mut map = self.callmap.lock().unwrap();
@@ -87,15 +89,16 @@ impl AConnection {
 impl Drop for AConnection {
     fn drop(&mut self) {
         debug!("Dropping AConnection");
-        self.conn.set_watch_callback(Box::new(|_| {}));
+        let conn = self.conn.lock().unwrap();
+        conn.set_watch_callback(Box::new(|_| {}));
     }
 }
 
 #[derive(Debug)]
 // Internal struct; this is the future spawned on the core.
 pub struct ADriver {
-    conn: Arc<Connection>,
-    fds: HashMap<RawFd, PollEvented2<AWatch>>,
+    conn: Arc<Mutex<Connection>>,
+    fds: Arc<Mutex<HashMap<RawFd, PollEvented2<AWatch>>>>,
     callmap: MCallMap,
 }
 
@@ -103,15 +106,17 @@ impl ADriver {
     fn modify_watch(&mut self, w: Watch, poll_now: bool) -> io::Result<()> {
         debug!("Modify_watch: {:?}, poll_now: {:?}", w, poll_now);
         if !w.readable() && !w.writable() {
-            self.fds.remove(&w.fd());
+            let mut fds = self.fds.lock().unwrap();
+            fds.remove(&w.fd());
         } else {
-            if let Some(evented) = self.fds.get(&w.fd()) {
+            let mut fds = self.fds.lock().unwrap();
+            if let Some(evented) = fds.get(&w.fd()) {
                 let ww = evented.get_ref().0;
                 if ww.readable() == w.readable() && ww.writable() == w.writable() {
                     return Ok(());
                 };
             }
-            self.fds.remove(&w.fd());
+            fds.remove(&w.fd());
 
             let z = PollEvented2::new(AWatch(w));
 
@@ -122,25 +127,10 @@ impl ADriver {
                 z.clear_write_ready()?;
             };
 
-            self.fds.insert(w.fd(), z);
+            fds.insert(w.fd(), z);
         }
         Ok(())
     }
-
-    /*fn handle_msgs(&mut self) {
-    let msgs = ConnMsgs { conn: self.conn.clone(), timeout_ms: None };
-    for m in msgs {
-        debug!("handle_msgs: {:?}", m);
-        /*if m.msg_type() == MessageType::MethodReturn {
-            let mut map = self.callmap.lock().unwrap();
-            let serial = m.get_reply_serial().unwrap();
-            let r = map.remove(&serial);
-            debug!("Serial {:?}, found: {:?}", serial, r.is_some());
-            if let Some(r) = r { r.send(m).unwrap(); }
-            else { self.send_stream(m) }
-        }*/
-    }
-    }*/
 }
 
 impl Stream for ADriver {
@@ -148,8 +138,9 @@ impl Stream for ADriver {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        trace!("Evented fds {}", self.fds.len());
-        for w in self.fds.values() {
+        let fds = self.fds.lock().unwrap();
+        trace!("Evented fds {}", fds.len());
+        for w in fds.values() {
             let mut mask = UnixReady::hup() | UnixReady::error();
             if w.get_ref().0.readable() {
                 mask = mask | Ready::readable().into();
@@ -199,10 +190,11 @@ impl Stream for ADriver {
             };
 
             debug!("D-Bus i/o unix ready: {:?} is {:?}", w.get_ref().0.fd(), ur);
-            self.conn.watch_handle(w.get_ref().0.fd(), flags);
+            let conn = self.conn.lock().unwrap();
+            conn.watch_handle(w.get_ref().0.fd(), flags);
             if ur.is_readable() {
-                let mut msgs = ConnMsgs { conn: self.conn.clone(), timeout_ms: None };
-                // Calling last will consume all other messages in the socket buffer!
+
+                let mut msgs = ConnMsgs { conn: conn, timeout_ms: None };
                 if let Some(msg) = msgs.last() {
                     return Ok(Async::Ready(Some(msg)));
                 }

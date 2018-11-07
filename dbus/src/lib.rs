@@ -16,6 +16,8 @@
 #![warn(missing_docs)]
 
 extern crate libc;
+#[macro_use]
+extern crate log;
 
 pub use ffi::DBusBusType as BusType;
 pub use connection::DBusNameFlag as NameFlag;
