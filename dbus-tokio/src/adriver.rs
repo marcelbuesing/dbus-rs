@@ -1,15 +1,15 @@
+use mio::unix::UnixReady;
+use mio::{self, unix, Ready};
+use std::io;
 use dbus::{ConnMsgs, Connection, Error as DBusError, Message, MessageType, Watch, WatchEvent};
 use futures::sync::{mpsc, oneshot};
 use futures::{Async, Future, Poll, Stream};
-use mio::unix::UnixReady;
-use mio::{self, unix, Ready};
-use std::collections::HashMap;
-use std::io;
-use std::os::raw::c_uint;
-use std::os::unix::io::RawFd;
-use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::reactor::PollEvented2;
+use tokio::runtime::current_thread::Runtime;
+use std::os::raw::c_uint;
+use std::collections::HashMap;
+use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex};
 
 type MCallMap = Arc<Mutex<HashMap<u32, oneshot::Sender<Message>>>>;
 
@@ -24,7 +24,6 @@ type MStream = Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>;
 pub struct AConnection {
     conn: Arc<Mutex<Connection>>,
     callmap: MCallMap,
-    msgstream: MStream,
 }
 
 impl AConnection {
@@ -32,21 +31,17 @@ impl AConnection {
     ///
     /// The task handles incoming messages, and continues to do so until the
     /// AConnection is dropped.
-    pub fn new(c: Connection) -> io::Result<AConnection> {
+    pub fn new(c: Connection) -> AConnection {
         let map: MCallMap = Default::default();
-        let istream: MStream = Default::default();
 
         c.set_watch_callback(Box::new(|_| {
             unimplemented!("Watch handling is very rare and not implemented yet")
         }));
 
-        let i = AConnection {
+        AConnection {
             conn: Arc::new(Mutex::new(c)),
             callmap: map,
-            msgstream: istream,
-        };
-
-        Ok(i)
+        }
     }
 
     /// Returns a stream of incoming messages.
@@ -291,9 +286,9 @@ impl Drop for AMethodCall {
 
 #[test]
 fn aconnection_test() {
-    let conn = Arc::new(Connection::get_private(::dbus::BusType::Session).unwrap());
+    let conn = Connection::get_private(::dbus::BusType::Session).unwrap();
+    let aconn = AConnection::new(conn);
 
-    let aconn = AConnection::new(conn.clone());
 
 //    let mut rt = Runtime::new().unwrap();
 
@@ -307,6 +302,28 @@ fn aconnection_test() {
 #[test]
 fn astream_test() {
     let conn = Connection::get_private(::dbus::BusType::Session).unwrap();
+    let mut rt = Runtime::new().unwrap();
+    let aconn = AConnection::new(conn);
+
+    let f = aconn.messages().unwrap().map_err(|_| ()).for_each(|msg| {
+        println!("first signal was: {:?}", msg);
+        Ok(())
+    });
+
+    // let items: ADriver = aconn.messages().unwrap();
+    // let signals = items.filter_map(|m| if m.msg_type() == ::dbus::MessageType::Signal { Some(m) } else { None });
+
+    let firstsig = rt.block_on(f).unwrap();
+    println!("first signal was: {:?}", firstsig);
+    // assert_eq!(firstsig.unwrap().msg_type(), ::dbus::MessageType::Signal);
+
+
+    // tokio::spawn(f1);
+    // let signals = items.filter_map(|m| if m.msg_type() == ::dbus::MessageType::Signal { Some(m) } else { None });
+    // let firstsig = rt.block_on(signals.into_future()).map(|(x, _)| x).map_err(|(x, _)| x).unwrap();
+    // println!("first signal was: {:?}", firstsig);
+    // assert_eq!(firstsig.unwrap().msg_type(), ::dbus::MessageType::Signal);
+
 
     /*let aconn = AConnection::new(Arc::new(Mutex::new(conn)));
     let f = aconn.map_err(|_| ()).and_then(|conn| {
@@ -324,4 +341,5 @@ fn astream_test() {
     let signals = items.filter_map(|m| if m.msg_type() == ::dbus::MessageType::Signal { Some(m) } else { None });
     let firstsig = rt.block_on(signals.into_future()).map(|(x, _)| x).map_err(|(x, _)| x).unwrap();
     println!("first signal was: {:?}", firstsig);
-    assert_eq!(firstsig.unwrap().msg_type(), ::dbus::MessageType::Signal);*/}
+    assert_eq!(firstsig.unwrap().msg_type(), ::dbus::MessageType::Signal);*/
+}
